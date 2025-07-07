@@ -76,8 +76,7 @@ BEGIN
             updated_at,
             role,
             aud,
-            confirmation_token,
-            email_confirmed_at
+            confirmation_token
         ) VALUES (
             new_user_id,
             '00000000-0000-0000-0000-000000000000',
@@ -88,8 +87,7 @@ BEGIN
             NOW(),
             'authenticated',
             'authenticated',
-            '',
-            NOW()
+            ''
         );
         
         result_text := 'Created auth user with ID: ' || new_user_id;
@@ -219,10 +217,10 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- ===========================================
--- VERIFICATION FUNCTIONS
+-- VERIFICATION FUNCTIONS (FIXED DATA TYPES)
 -- ===========================================
 
--- Function to check what users exist
+-- Function to check what users exist (fixed data types)
 CREATE OR REPLACE FUNCTION check_all_users()
 RETURNS TABLE(
     source TEXT,
@@ -240,9 +238,9 @@ BEGIN
         'users_table'::TEXT as source,
         u.id,
         'N/A'::TEXT as email,
-        u.first_name,
-        u.last_name,
-        r.name as role_name,
+        u.first_name::TEXT,
+        u.last_name::TEXT,
+        r.name::TEXT as role_name,
         u.created_at
     FROM users u
     JOIN roles r ON u.role_id = r.id
@@ -254,7 +252,7 @@ BEGIN
         SELECT 
             'auth_table'::TEXT as source,
             au.id,
-            au.email,
+            au.email::TEXT,
             'N/A'::TEXT as first_name,
             'N/A'::TEXT as last_name,
             'N/A'::TEXT as role_name,
@@ -273,12 +271,39 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 CREATE OR REPLACE FUNCTION check_roles()
 RETURNS TABLE(
     role_id INTEGER,
-    role_name VARCHAR(50),
+    role_name TEXT,
     role_description TEXT
 ) AS $$
 BEGIN
     RETURN QUERY
-    SELECT id, name, description FROM roles ORDER BY id;
+    SELECT id, name::TEXT, description FROM roles ORDER BY id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Simple function to just show users table content
+CREATE OR REPLACE FUNCTION show_users_simple()
+RETURNS TABLE(
+    user_id UUID,
+    first_name TEXT,
+    last_name TEXT,
+    company_name TEXT,
+    role_name TEXT,
+    status TEXT,
+    created_at TIMESTAMP WITH TIME ZONE
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        u.id,
+        u.first_name::TEXT,
+        u.last_name::TEXT,
+        u.company_name::TEXT,
+        r.name::TEXT as role_name,
+        u.status::TEXT,
+        u.created_at
+    FROM users u
+    JOIN roles r ON u.role_id = r.id
+    ORDER BY u.created_at DESC;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
@@ -290,28 +315,41 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 SELECT 'CHECKING ROLES:' as step;
 SELECT * FROM check_roles();
 
+-- Try Method 2 first (Profile only - this should definitely work)
+SELECT 'TRYING METHOD 2 - Profile Only:' as step;
+SELECT create_admin_profile_only();
+
+-- Check what users we have now (simple version)
+SELECT 'CHECKING USERS AFTER METHOD 2:' as step;
+SELECT * FROM show_users_simple();
+
 -- Try Method 1: Create admin user directly
 SELECT 'TRYING METHOD 1 - Direct Creation:' as step;
 SELECT create_admin_user_direct();
 
--- Check what users we have now
-SELECT 'CHECKING USERS AFTER METHOD 1:' as step;
-SELECT * FROM check_all_users();
-
--- If Method 1 didn't work, try Method 2: Profile only
-SELECT 'TRYING METHOD 2 - Profile Only:' as step;
-SELECT create_admin_profile_only();
-
 -- Check users again
-SELECT 'CHECKING USERS AFTER METHOD 2:' as step;
-SELECT * FROM check_all_users();
+SELECT 'CHECKING USERS AFTER METHOD 1:' as step;
+SELECT * FROM show_users_simple();
 
 -- Final verification - count users by role
 SELECT 'FINAL COUNT BY ROLE:' as step;
 SELECT 
-    r.name as role_name,
+    r.name::TEXT as role_name,
     COUNT(u.id) as user_count
 FROM roles r
 LEFT JOIN users u ON r.id = u.role_id
 GROUP BY r.id, r.name
 ORDER BY r.id;
+
+-- Show final users table content
+SELECT 'FINAL USERS TABLE CONTENT:' as step;
+SELECT 
+    id,
+    first_name,
+    last_name,
+    company_name,
+    role_id,
+    status,
+    created_at
+FROM users
+ORDER BY created_at DESC;
