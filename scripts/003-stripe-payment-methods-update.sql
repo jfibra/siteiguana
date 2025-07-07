@@ -178,38 +178,6 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- ===========================================
--- UPDATED SEEDING SCRIPT WITH PROPER USER CREATION
--- ===========================================
-
--- Function to create a complete admin user (Auth + Profile)
-CREATE OR REPLACE FUNCTION create_admin_user_complete(
-    p_email TEXT,
-    p_password TEXT,
-    p_first_name TEXT DEFAULT 'Iguana',
-    p_last_name TEXT DEFAULT 'Overseer'
-)
-RETURNS TEXT AS $$
-DECLARE
-    admin_role_id INTEGER;
-    result_message TEXT;
-BEGIN
-    -- Get the admin role ID
-    SELECT id INTO admin_role_id FROM roles WHERE name = 'admin';
-    
-    -- Note: This function provides the structure, but you still need to create
-    -- the user through Supabase Auth UI or API first, then run setup_admin_user()
-    
-    result_message := 'To create admin user: 
-    1. Go to Supabase Auth Dashboard
-    2. Create user with email: ' || p_email || '
-    3. Set password: ' || p_password || '
-    4. Then run: SELECT setup_admin_user(''' || p_email || ''');';
-    
-    RETURN result_message;
-END;
-$$ LANGUAGE plpgsql;
-
--- ===========================================
 -- SAMPLE PAYMENT METHODS (for testing)
 -- ===========================================
 
