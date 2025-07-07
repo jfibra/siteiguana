@@ -38,7 +38,8 @@ CREATE INDEX IF NOT EXISTS idx_stripe_payment_methods_default ON stripe_payment_
 -- ===========================================
 
 -- Add Stripe customer ID to users table if not exists
-ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(255);
 
 -- Add more Stripe fields to website_subscriptions table
 ALTER TABLE website_subscriptions ADD COLUMN IF NOT EXISTS stripe_price_id TEXT; -- Stripe price ID for the plan
@@ -47,6 +48,106 @@ ALTER TABLE website_subscriptions ADD COLUMN IF NOT EXISTS stripe_payment_method
 -- Add Stripe fields to payment_transactions table
 ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
 ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS stripe_payment_method_id TEXT;
+
+-- Add Stripe-related columns to website_requests table
+ALTER TABLE website_requests ADD COLUMN IF NOT EXISTS stripe_setup_payment_intent_id VARCHAR(255);
+ALTER TABLE website_requests ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(255);
+
+-- ===========================================
+-- CREATE NEW TABLES FOR STRIPE INTEGRATION
+-- ===========================================
+
+-- Create payment_methods table to store user payment method references
+CREATE TABLE IF NOT EXISTS payment_methods (
+    id SERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    stripe_payment_method_id VARCHAR(255) NOT NULL,
+    type VARCHAR(50) NOT NULL DEFAULT 'card', -- card, bank_account, etc.
+    
+    -- Safe display information (never store actual card numbers)
+    card_brand VARCHAR(50), -- visa, mastercard, amex, etc.
+    card_last4 VARCHAR(4), -- last 4 digits only
+    card_exp_month INTEGER,
+    card_exp_year INTEGER,
+    
+    -- Status and metadata
+    is_default BOOLEAN DEFAULT FALSE,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Add indexes for performance
+CREATE INDEX IF NOT EXISTS idx_payment_methods_user_id ON payment_methods(user_id);
+CREATE INDEX IF NOT EXISTS idx_payment_methods_stripe_id ON payment_methods(stripe_payment_method_id);
+CREATE INDEX IF NOT EXISTS idx_users_stripe_customer ON users(stripe_customer_id);
+
+-- Create subscriptions table to track recurring billing
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id SERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    website_request_id INTEGER REFERENCES website_requests(id) ON DELETE CASCADE,
+    plan_id INTEGER NOT NULL REFERENCES website_plans(id),
+    
+    -- Stripe references
+    stripe_subscription_id VARCHAR(255) UNIQUE,
+    stripe_customer_id VARCHAR(255),
+    stripe_payment_method_id VARCHAR(255),
+    
+    -- Subscription details
+    status VARCHAR(50) NOT NULL DEFAULT 'active', -- active, canceled, past_due, unpaid
+    current_period_start TIMESTAMP WITH TIME ZONE,
+    current_period_end TIMESTAMP WITH TIME ZONE,
+    
+    -- Pricing (stored for historical record)
+    monthly_amount DECIMAL(10,2) NOT NULL,
+    currency VARCHAR(3) DEFAULT 'USD',
+    
+    -- Usage tracking
+    changes_used_this_month INTEGER DEFAULT 0,
+    changes_reset_date DATE,
+    
+    -- Timestamps
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    canceled_at TIMESTAMP WITH TIME ZONE
+);
+
+-- Add indexes for subscriptions
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_id ON subscriptions(stripe_subscription_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
+
+-- Create payment_history table to track all payments
+CREATE TABLE IF NOT EXISTS payment_history (
+    id SERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    website_request_id INTEGER REFERENCES website_requests(id),
+    subscription_id INTEGER REFERENCES subscriptions(id),
+    
+    -- Stripe references
+    stripe_payment_intent_id VARCHAR(255),
+    stripe_invoice_id VARCHAR(255),
+    
+    -- Payment details
+    amount DECIMAL(10,2) NOT NULL,
+    currency VARCHAR(3) DEFAULT 'USD',
+    payment_type VARCHAR(50) NOT NULL, -- setup_fee, monthly_subscription, one_time
+    status VARCHAR(50) NOT NULL, -- succeeded, failed, pending, canceled
+    
+    -- Metadata
+    description TEXT,
+    failure_reason TEXT,
+    
+    -- Timestamps
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    processed_at TIMESTAMP WITH TIME ZONE
+);
+
+-- Add indexes for payment history
+CREATE INDEX IF NOT EXISTS idx_payment_history_user_id ON payment_history(user_id);
+CREATE INDEX IF NOT EXISTS idx_payment_history_status ON payment_history(status);
+CREATE INDEX IF NOT EXISTS idx_payment_history_type ON payment_history(payment_type);
 
 -- ===========================================
 -- ROW LEVEL SECURITY FOR PAYMENT METHODS
@@ -66,6 +167,56 @@ CREATE POLICY "Users can update own payment methods" ON stripe_payment_methods
 -- Admins can view all payment methods (for support purposes)
 CREATE POLICY "Admins can view all payment methods" ON stripe_payment_methods
     FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM users u 
+            JOIN roles r ON u.role_id = r.id 
+            WHERE u.id = auth.uid() AND r.name = 'admin'
+        )
+    );
+
+-- Enable RLS on new tables
+ALTER TABLE payment_methods ENABLE ROW LEVEL SECURITY;
+ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_history ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies for payment_methods
+CREATE POLICY "Users can view their own payment methods" ON payment_methods
+    FOR SELECT USING (user_id = auth.uid());
+
+CREATE POLICY "Users can insert their own payment methods" ON payment_methods
+    FOR INSERT WITH CHECK (user_id = auth.uid());
+
+CREATE POLICY "Users can update their own payment methods" ON payment_methods
+    FOR UPDATE USING (user_id = auth.uid());
+
+CREATE POLICY "Admins can view all payment methods" ON payment_methods
+    FOR ALL USING (
+        EXISTS (
+            SELECT 1 FROM users u 
+            JOIN roles r ON u.role_id = r.id 
+            WHERE u.id = auth.uid() AND r.name = 'admin'
+        )
+    );
+
+-- RLS Policies for subscriptions
+CREATE POLICY "Users can view their own subscriptions" ON subscriptions
+    FOR SELECT USING (user_id = auth.uid());
+
+CREATE POLICY "Admins can view all subscriptions" ON subscriptions
+    FOR ALL USING (
+        EXISTS (
+            SELECT 1 FROM users u 
+            JOIN roles r ON u.role_id = r.id 
+            WHERE u.id = auth.uid() AND r.name = 'admin'
+        )
+    );
+
+-- RLS Policies for payment_history
+CREATE POLICY "Users can view their own payment history" ON payment_history
+    FOR SELECT USING (user_id = auth.uid());
+
+CREATE POLICY "Admins can view all payment history" ON payment_history
+    FOR ALL USING (
         EXISTS (
             SELECT 1 FROM users u 
             JOIN roles r ON u.role_id = r.id 
@@ -177,10 +328,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- ===========================================
--- SAMPLE PAYMENT METHODS (for testing)
--- ===========================================
-
 -- Function to create sample payment methods (after users exist)
 CREATE OR REPLACE FUNCTION create_sample_payment_methods()
 RETURNS TEXT AS $$
@@ -209,6 +356,23 @@ BEGIN
     END IF;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Update triggers for updated_at columns
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER update_payment_methods_updated_at
+    BEFORE UPDATE ON payment_methods
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_subscriptions_updated_at
+    BEFORE UPDATE ON subscriptions
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- ===========================================
 -- VERIFICATION QUERIES
