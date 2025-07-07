@@ -46,17 +46,32 @@ const navItems = [
   },
 ]
 
+interface UserProfile {
+  first_name?: string
+  last_name?: string
+  profile_image?: string
+}
+
+interface AuthState {
+  user: any | null
+  profile: UserProfile | null
+  isLoading: boolean
+}
+
 export function Navbar() {
   const [isScrolled, setIsScrolled] = useState(false)
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [activeSubmenu, setActiveSubmenu] = useState<number | null>(null)
-  const [user, setUser] = useState<any>(null)
-  const [userProfile, setUserProfile] = useState<any>(null)
-  const [isLoadingUser, setIsLoadingUser] = useState(true)
+  const [authState, setAuthState] = useState<AuthState>({
+    user: null,
+    profile: null,
+    isLoading: true,
+  })
 
   const router = useRouter()
   const supabase = createSupabaseClient()
 
+  // Handle scroll effect
   useEffect(() => {
     const handleScroll = () => {
       setIsScrolled(window.scrollY > 20)
@@ -65,61 +80,7 @@ export function Navbar() {
     return () => window.removeEventListener("scroll", handleScroll)
   }, [])
 
-  useEffect(() => {
-    const getUser = async () => {
-      setIsLoadingUser(true)
-      try {
-        const {
-          data: { session },
-        } = await supabase.auth.getSession()
-        setUser(session?.user || null)
-
-        if (session?.user) {
-          const { data: profileData } = await supabase
-            .from("users")
-            .select("first_name, last_name, profile_image")
-            .eq("id", session.user.id)
-            .single()
-
-          if (profileData) {
-            setUserProfile(profileData)
-          }
-        }
-      } catch (error) {
-        console.error("Error fetching user:", error)
-      } finally {
-        setIsLoadingUser(false)
-      }
-    }
-    getUser()
-
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      setUser(session?.user || null)
-      setIsLoadingUser(true)
-      if (session?.user) {
-        try {
-          const { data: profileData } = await supabase
-            .from("users")
-            .select("first_name, last_name, profile_image")
-            .eq("id", session.user.id)
-            .single()
-          if (profileData) {
-            setUserProfile(profileData)
-          } else {
-            setUserProfile(null)
-          }
-        } catch (error) {
-          console.error("Error fetching user on auth change:", error)
-          setUserProfile(null)
-        }
-      } else {
-        setUserProfile(null)
-      }
-      setIsLoadingUser(false)
-    })
-    return () => authListener.subscription.unsubscribe()
-  }, [supabase])
-
+  // Handle click outside mobile menu
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const mobileMenu = document.getElementById("mobile-menu")
@@ -139,6 +100,92 @@ export function Navbar() {
     return () => document.removeEventListener("click", handleClickOutside)
   }, [isMobileMenuOpen])
 
+  // Fetch user profile data
+  const fetchUserProfile = async (userId: string): Promise<UserProfile | null> => {
+    try {
+      const { data: profileData, error } = await supabase
+        .from("users")
+        .select("first_name, last_name, profile_image")
+        .eq("id", userId)
+        .single()
+
+      if (error) {
+        console.error("Error fetching user profile:", error)
+        return null
+      }
+
+      return profileData
+    } catch (error) {
+      console.error("Exception fetching user profile:", error)
+      return null
+    }
+  }
+
+  // Initialize auth state and set up listener
+  useEffect(() => {
+    let mounted = true
+
+    const initializeAuth = async () => {
+      try {
+        const {
+          data: { session },
+          error,
+        } = await supabase.auth.getSession()
+
+        if (error) {
+          console.error("Error getting session:", error)
+          if (mounted) {
+            setAuthState({ user: null, profile: null, isLoading: false })
+          }
+          return
+        }
+
+        if (session?.user && mounted) {
+          const profile = await fetchUserProfile(session.user.id)
+          setAuthState({
+            user: session.user,
+            profile,
+            isLoading: false,
+          })
+        } else if (mounted) {
+          setAuthState({ user: null, profile: null, isLoading: false })
+        }
+      } catch (error) {
+        console.error("Error initializing auth:", error)
+        if (mounted) {
+          setAuthState({ user: null, profile: null, isLoading: false })
+        }
+      }
+    }
+
+    initializeAuth()
+
+    // Set up auth state listener
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (!mounted) return
+
+      if (event === "SIGNED_OUT" || !session) {
+        setAuthState({ user: null, profile: null, isLoading: false })
+      } else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
+        if (session?.user) {
+          const profile = await fetchUserProfile(session.user.id)
+          setAuthState({
+            user: session.user,
+            profile,
+            isLoading: false,
+          })
+        }
+      }
+    })
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
+  }, [supabase])
+
   const toggleSubmenu = (index: number, e: React.MouseEvent) => {
     e.stopPropagation()
     setActiveSubmenu(activeSubmenu === index ? null : index)
@@ -152,16 +199,20 @@ export function Navbar() {
 
   const handleLogout = async () => {
     try {
+      setAuthState((prev) => ({ ...prev, isLoading: true }))
       await supabase.auth.signOut()
       router.push("/")
     } catch (error) {
       console.error("Error logging out:", error)
+      setAuthState((prev) => ({ ...prev, isLoading: false }))
     }
   }
 
   const navigateTo = (path: string) => {
     router.push(path)
   }
+
+  const { user, profile, isLoading } = authState
 
   return (
     <motion.nav
@@ -182,6 +233,7 @@ export function Navbar() {
             </motion.div>
           </Link>
 
+          {/* Desktop Navigation */}
           <div className="hidden md:flex items-center space-x-1">
             {navItems.map((item, index) => (
               <div key={item.href} className="relative group">
@@ -231,54 +283,59 @@ export function Navbar() {
                 )}
               </div>
             ))}
-            {!isLoadingUser && (
-              <>
-                {user ? (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger className="relative h-10 w-10 rounded-full ml-4 hover:bg-green-100 cursor-pointer focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors">
-                      <Avatar className="h-10 w-10">
-                        <AvatarImage src={userProfile?.profile_image || ""} alt="Profile" />
-                        <AvatarFallback className="bg-green-100 text-green-600">
-                          {userProfile?.first_name?.[0] || user.email?.[0]?.toUpperCase()}
-                        </AvatarFallback>
-                      </Avatar>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent className="w-56" align="end" forceMount>
-                      <div className="flex items-center justify-start gap-2 p-2">
-                        <div className="flex flex-col space-y-1 leading-none">
-                          <p className="font-medium">
-                            {userProfile?.first_name} {userProfile?.last_name}
-                          </p>
-                          <p className="w-[200px] truncate text-sm text-muted-foreground">{user.email}</p>
-                        </div>
+
+            {/* Auth Section */}
+            <div className="ml-4">
+              {isLoading ? (
+                <div className="w-10 h-10 rounded-full bg-gray-200 animate-pulse" />
+              ) : user ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger className="relative h-10 w-10 rounded-full hover:bg-green-100 cursor-pointer focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors">
+                    <Avatar className="h-10 w-10">
+                      <AvatarImage src={profile?.profile_image || ""} alt="Profile" />
+                      <AvatarFallback className="bg-green-100 text-green-600">
+                        {profile?.first_name?.[0] || user.email?.[0]?.toUpperCase() || "U"}
+                      </AvatarFallback>
+                    </Avatar>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent className="w-56" align="end" forceMount>
+                    <div className="flex items-center justify-start gap-2 p-2">
+                      <div className="flex flex-col space-y-1 leading-none">
+                        <p className="font-medium">
+                          {profile?.first_name && profile?.last_name
+                            ? `${profile.first_name} ${profile.last_name}`
+                            : "User"}
+                        </p>
+                        <p className="w-[200px] truncate text-sm text-muted-foreground">{user.email}</p>
                       </div>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem className="cursor-pointer" onClick={() => navigateTo("/user/dashboard")}>
-                        <User className="mr-2 h-4 w-4" />
-                        Dashboard
-                      </DropdownMenuItem>
-                      <DropdownMenuItem className="cursor-pointer" onClick={() => navigateTo("/user/profile")}>
-                        <User className="mr-2 h-4 w-4" />
-                        Profile
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem className="text-red-600 cursor-pointer" onClick={handleLogout}>
-                        <LogOut className="mr-2 h-4 w-4" />
-                        Logout
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                ) : (
-                  <Link href="/auth" className="ml-4">
-                    <Button className="iguana-button text-white shadow-md hover:shadow-lg transition-all">
-                      Get Started
-                    </Button>
-                  </Link>
-                )}
-              </>
-            )}
+                    </div>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem className="cursor-pointer" onClick={() => navigateTo("/user/dashboard")}>
+                      <User className="mr-2 h-4 w-4" />
+                      Dashboard
+                    </DropdownMenuItem>
+                    <DropdownMenuItem className="cursor-pointer" onClick={() => navigateTo("/user/profile")}>
+                      <User className="mr-2 h-4 w-4" />
+                      Profile
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem className="text-red-600 cursor-pointer" onClick={handleLogout}>
+                      <LogOut className="mr-2 h-4 w-4" />
+                      Logout
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : (
+                <Link href="/auth">
+                  <Button className="iguana-button text-white shadow-md hover:shadow-lg transition-all">
+                    Get Started
+                  </Button>
+                </Link>
+              )}
+            </div>
           </div>
 
+          {/* Mobile Menu Button */}
           <button
             id="mobile-menu-button"
             className="md:hidden p-2 rounded-md hover:bg-green-100 transition-colors"
@@ -288,6 +345,7 @@ export function Navbar() {
           </button>
         </div>
 
+        {/* Mobile Menu */}
         <AnimatePresence>
           {isMobileMenuOpen && (
             <motion.div
@@ -347,52 +405,58 @@ export function Navbar() {
                     )}
                   </div>
                 ))}
-                {!isLoadingUser && (
-                  <div className="border-t border-green-100 pt-3 mt-3">
-                    {user ? (
-                      <>
-                        <div className="px-3 py-2 text-sm text-gray-600">
-                          {userProfile?.first_name} {userProfile?.last_name}
-                          <br />
-                          <span className="text-xs">{user.email}</span>
-                        </div>
-                        <button
-                          onClick={() => {
-                            navigateTo("/user/dashboard")
-                            setIsMobileMenuOpen(false)
-                          }}
-                          className="block w-full text-left px-3 py-2 text-gray-700 hover:text-green-600 hover:bg-green-50 rounded-md"
-                        >
-                          Dashboard
-                        </button>
-                        <button
-                          onClick={() => {
-                            navigateTo("/user/profile")
-                            setIsMobileMenuOpen(false)
-                          }}
-                          className="block w-full text-left px-3 py-2 text-gray-700 hover:text-green-600 hover:bg-green-50 rounded-md"
-                        >
-                          Profile
-                        </button>
-                        <button
-                          onClick={() => {
-                            handleLogout()
-                            setIsMobileMenuOpen(false)
-                          }}
-                          className="block w-full text-left px-3 py-2 text-red-600 hover:bg-red-50 rounded-md"
-                        >
-                          Logout
-                        </button>
-                      </>
-                    ) : (
-                      <div className="px-3 py-3">
-                        <Link href="/auth" onClick={() => setIsMobileMenuOpen(false)}>
-                          <Button className="w-full iguana-button text-white">Get Started</Button>
-                        </Link>
+
+                {/* Mobile Auth Section */}
+                <div className="border-t border-green-100 pt-3 mt-3">
+                  {isLoading ? (
+                    <div className="px-3 py-2">
+                      <div className="w-full h-8 bg-gray-200 rounded animate-pulse" />
+                    </div>
+                  ) : user ? (
+                    <>
+                      <div className="px-3 py-2 text-sm text-gray-600">
+                        {profile?.first_name && profile?.last_name
+                          ? `${profile.first_name} ${profile.last_name}`
+                          : "User"}
+                        <br />
+                        <span className="text-xs">{user.email}</span>
                       </div>
-                    )}
-                  </div>
-                )}
+                      <button
+                        onClick={() => {
+                          navigateTo("/user/dashboard")
+                          setIsMobileMenuOpen(false)
+                        }}
+                        className="block w-full text-left px-3 py-2 text-gray-700 hover:text-green-600 hover:bg-green-50 rounded-md"
+                      >
+                        Dashboard
+                      </button>
+                      <button
+                        onClick={() => {
+                          navigateTo("/user/profile")
+                          setIsMobileMenuOpen(false)
+                        }}
+                        className="block w-full text-left px-3 py-2 text-gray-700 hover:text-green-600 hover:bg-green-50 rounded-md"
+                      >
+                        Profile
+                      </button>
+                      <button
+                        onClick={() => {
+                          handleLogout()
+                          setIsMobileMenuOpen(false)
+                        }}
+                        className="block w-full text-left px-3 py-2 text-red-600 hover:bg-red-50 rounded-md"
+                      >
+                        Logout
+                      </button>
+                    </>
+                  ) : (
+                    <div className="px-3 py-3">
+                      <Link href="/auth" onClick={() => setIsMobileMenuOpen(false)}>
+                        <Button className="w-full iguana-button text-white">Get Started</Button>
+                      </Link>
+                    </div>
+                  )}
+                </div>
               </div>
             </motion.div>
           )}
